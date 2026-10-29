@@ -1,0 +1,13 @@
+node_modules/
+build/
+dist/
+coverage/
+data/
+*.sqlite
+*.db.json
+bun.lock
+.DS_Store
+*.log
+.env*
+!.env.example
+
