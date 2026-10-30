@@ -2,7 +2,9 @@ node_modules/
 build/
 dist/
 coverage/
-data/
+/data/
+!src/data/
+!src/data/**
 *.sqlite
 *.db.json
 bun.lock
