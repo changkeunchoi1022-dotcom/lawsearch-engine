@@ -57,6 +57,10 @@ import {
   exportReviewMatrixToXlsx,
   exportReviewReportToDocx,
 } from './utils/reportExporter.ts';
+import {
+  dispatchClientApi,
+  handleClientBootstrap,
+} from './engine/clientStore.ts';
 
 type ScreenId =
   | 'DASHBOARD'
@@ -133,23 +137,49 @@ export default function App() {
   );
   const [reviewReason, setReviewReason] = useState('');
 
+  const [isClientOfflineMode, setIsClientOfflineMode] = useState<boolean>(false);
+
   const apiFetch = useCallback(
     async (url: string, options: RequestInit = {}) => {
-      const res = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-actor-user-id': activeActorId,
-          ...(options.headers || {}),
-        },
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.errorKo || `요청 처리 중 오류가 발생했습니다 (HTTP ${res.status})`);
+      if (isClientOfflineMode) {
+        return dispatchClientApi(url, options, activeActorId, workspaceMode);
       }
-      return json;
+
+      try {
+        const res = await fetch(url, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            'x-actor-user-id': activeActorId,
+            ...(options.headers || {}),
+          },
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/html') || res.status === 404) {
+          setIsClientOfflineMode(true);
+          return dispatchClientApi(url, options, activeActorId, workspaceMode);
+        }
+
+        const text = await res.text();
+        let json: any;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          setIsClientOfflineMode(true);
+          return dispatchClientApi(url, options, activeActorId, workspaceMode);
+        }
+
+        if (!res.ok) {
+          throw new Error(json.errorKo || `요청 처리 중 오류가 발생했습니다 (HTTP ${res.status})`);
+        }
+        return json;
+      } catch {
+        setIsClientOfflineMode(true);
+        return dispatchClientApi(url, options, activeActorId, workspaceMode);
+      }
     },
-    [activeActorId]
+    [activeActorId, workspaceMode, isClientOfflineMode]
   );
 
   const loadBootstrap = useCallback(async () => {
@@ -164,17 +194,47 @@ export default function App() {
       ) {
         setSelectedProjectId(payload.projects[0].id);
       }
-    } catch (err: unknown) {
-      setBannerMessage({
-        type: 'ERROR',
-        text: err instanceof Error ? err.message : String(err),
-      });
+    } catch {
+      try {
+        const fallbackPayload = handleClientBootstrap(activeActorId, workspaceMode) as BootstrapPayload;
+        setData(fallbackPayload);
+        setIsClientOfflineMode(true);
+        if (
+          fallbackPayload.projects.length > 0 &&
+          (!selectedProjectId || !fallbackPayload.projects.some((p) => p.id === selectedProjectId))
+        ) {
+          setSelectedProjectId(fallbackPayload.projects[0].id);
+        }
+      } catch (err: unknown) {
+        setBannerMessage({
+          type: 'ERROR',
+          text: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
-  }, [apiFetch, workspaceMode, selectedProjectId]);
+  }, [apiFetch, workspaceMode, selectedProjectId, activeActorId]);
 
   useEffect(() => {
     loadBootstrap();
   }, [loadBootstrap]);
+
+  // Safety net: automatically activate client storage if network response is delayed past 1.2s
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setData((prev) => {
+        if (!prev) {
+          setIsClientOfflineMode(true);
+          const fallback = handleClientBootstrap(activeActorId, workspaceMode) as BootstrapPayload;
+          if (fallback.projects.length > 0 && !selectedProjectId) {
+            setSelectedProjectId(fallback.projects[0].id);
+          }
+          return fallback;
+        }
+        return prev;
+      });
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [activeActorId, workspaceMode, selectedProjectId]);
 
   const activeProject = useMemo(() => {
     if (!data) return null;
@@ -600,10 +660,27 @@ export default function App() {
 
   if (!data) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="text-sm font-medium text-slate-700">
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 space-y-4">
+        <div className="w-9 h-9 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+        <div className="text-base font-semibold text-slate-800">
           공공공사 법령 시점검토 시스템을 불러오는 중입니다...
         </div>
+        <p className="text-xs text-slate-500 max-w-sm text-center">
+          네트워크 응답 또는 브라우저 로컬 저장소 상태를 점검하고 있습니다.
+        </p>
+        <button
+          onClick={() => {
+            const fallback = handleClientBootstrap(activeActorId, workspaceMode) as BootstrapPayload;
+            setData(fallback);
+            setIsClientOfflineMode(true);
+            if (fallback.projects.length > 0 && !selectedProjectId) {
+              setSelectedProjectId(fallback.projects[0].id);
+            }
+          }}
+          className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded shadow-sm transition"
+        >
+          로컬 브라우저 엔진으로 즉시 시작하기
+        </button>
       </div>
     );
   }
@@ -751,6 +828,13 @@ export default function App() {
                 데모 워크스페이스 (가상 예시)
               </button>
             </div>
+
+            {isClientOfflineMode && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                브라우저 로컬 엔진 가동 중
+              </span>
+            )}
 
             {workspaceMode === WorkspaceMode.DEMO && (
               <button
